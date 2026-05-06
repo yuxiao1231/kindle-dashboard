@@ -1,0 +1,85 @@
+name: KDB Release Bot
+
+on:
+  push:
+    tags:
+      - 'v*' # 当你推送以 v 开头的标签（如 v1.0）时触发
+
+jobs:
+  build-kindle-pkg:
+    name: Build Kindle Package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Create Release Archive
+        run: |
+          # 创建一个临时目录用于打包，模拟 Kindle extensions 结构
+          mkdir -p kdb_v1.0
+          # 拷贝必要文件，排除 tools 和 git 相关
+          cp -r bin lib assets main.lua memo.txt README.md LICENSE kdb_v1.0/
+          zip -r kdb-v1.0-kindle.zip kdb_v1.0/
+
+      - name: Upload Kindle Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kindle-package
+          path: kdb-v1.0-kindle.zip
+
+  build-python-tool:
+    name: Build Windows Tool
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install Pillow pyinstaller
+
+      - name: Build EXE with PyInstaller
+        run: |
+          cd tools
+          pyinstaller --onefile --name kdb_splash_tool splash_tool.py
+
+      - name: Upload Tool Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-tool
+          path: tools/dist/kdb_splash_tool.exe
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build-kindle-pkg, build-python-tool]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            kindle-package/kdb-v1.0-kindle.zip
+            windows-tool/kdb_splash_tool.exe
+          body: |
+            ## KDB v1.0 Initial Release
+            
+            ### 安装说明 / Installation
+            1. 下载 `kdb-v1.0-kindle.zip`。
+            2. 解压并将文件夹放入 Kindle 的 `extensions` 目录。
+            3. 修改 `memo.txt` 完成初始化配置。
+            
+            ### 工具说明 / Tools
+            - `kdb_splash_tool.exe`: 用于转换 Kindle 启动屏（Splash）的 Windows 桌面小工具。
+          draft: false
+          prerelease: false
