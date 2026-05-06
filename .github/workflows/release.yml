@@ -6,6 +6,9 @@ on:
       - 'v*' # 原本的：打 Tag 时自动触发
   workflow_dispatch: # 新加的：允许在 GitHub 网页上手动点击运行
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-kindle-pkg:
     name: Build Kindle Package
@@ -16,7 +19,7 @@ jobs:
 
       - name: Create Release Archive
         run: |
-          # 创建一个临时目录用于打包，模拟 Kindle extensions 结构
+          # 创建一个临时目录用于打包，模拟 Kindle extensgit push origin mainions 结构
           mkdir -p kdb_v1.0
           # 拷贝必要文件，排除 tools 和 git 相关
           cp -r bin lib assets main.lua memo.txt README.md LICENSE kdb_v1.0/
