@@ -1,0 +1,10 @@
+{
+  "lang": "eo",
+  "city": "Beijing",
+  "wifi_ssid": "nil",
+  "wifi_pw": "nil",
+  "tz": 0,
+  "unit": "C",
+  "time_fmt": "24",
+  "no_wifi":true
+}

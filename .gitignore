@@ -1,0 +1,13 @@
+.DS_Store
+Thumbs.db
+*.swp
+*~
+*.log
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.exe
+*.spec
+build/
+dist/

@@ -1,0 +1,82 @@
+# ============================================================
+# Kindle Desktop - Quick Start & Configuration Guide
+# ============================================================
+# Lines starting with "#" are comments. They will stay safely 
+# in this file as your manual, but won't be rendered on the E-ink screen.
+#
+# --- [ 1. File-Based State Routing & eMMC Protection ] ---
+# The system utilizes a minimalist state machine based on file existence:
+# * Dynamic Snapshot: By default, KDB takes a framebuffer snapshot 
+#   (`splash.raw`) on exit to resume seamlessly next time.
+# * Static Splash (eMMC Saver): If you place an E-ink raw/png image named 
+#   `custom_splash.raw/png` in the root folder, KDB will load it directly. 
+#   This overrides the default behavior and STOPS the snapshot saving 
+#   on exit, significantly extending your Kindle's eMMC lifespan by 
+#   reducing unnecessary write cycles.
+# * (! Frame Mode): If a file named `desktop.png` or `desktop.raw` exists
+#   in the root folder, the program will lock into a static photo frame
+#   displaying only this image, even after the battery dies. The only way
+#   out is to recharge or tap once power bottom to reboot the native framework. 
+#   (! WARNING: This mode completely bypasses and kills the Kindle's 
+#   native power management strategy.)
+#
+# --- [ 2. Parameter Injection (Digested on Boot) ] ---
+# Add the following tags anywhere in this file to configure your KDB. 
+# The parser will digest them, save the values to `config.json`, and 
+# then ERASE the tags from this file. (Only add what you need to change).
+#
+# Network & Weather:
+# WiFi setup:     {{wifi:YourSSID:YourPassword}}
+# Offline mode:   {{no_wifi:true}} (Disables network routing & weather)
+# Location:       {{weather:Newyork}}
+#
+# Region & Format:
+# Language:       {{lang:en}} or {{lang:zh}}
+# Temperature:    {{unit:C}} or {{unit:F}}
+# Time format:    {{time:24}} or {{time:12}}
+# Timezone:       {{tz:-4}} (e.g., -4 for EDT, 8 for BJS)
+#
+# --- [ 3. Memo Area ] ---
+# Write your daily tasks, notes, or thoughts below this line. Once the config 
+# tags are digested, the remaining plain text will be rendered directly 
+# onto the E-ink memo section. A single line should not exceed 35 characters, 
+# with a maximum of 4 lines.
+# ============================================================
+# 说明：本文件是系统的主干摄入通道。所有以 "#" 开头的行均为安全说明，不会显示在屏幕上。
+#
+# ── 【核心机制 1：系统启动与显存魔法】 ─────────────────────────
+# 你的设备底层由一个极简状态机接管，它通过检测特定文件来决定开机行为：
+#   * 默认动态恢复：系统在退出时会抓取当前屏幕为 splash.raw，下次无缝恢复。
+#   * 静态保护模式：如果你制作一张 e-ink raw/png 图像并命名为 `custom_splash.raw/png`，
+#     系统会以最高优先级加载它。开启此模式后，系统退出时将停止显存快照的读写，
+#     这能大幅减少 eMMC 闪存磨损，延长设备寿命。
+#   * （!画框模式）： 如果你根目录下存在 desktop.png 或 desktop.raw，那整个程序
+#     只会显示这张图片，没电了也是如此，除非重新充电或者单次按电源键重启原生框架。
+#     （！注意，这个模式会暴力杀掉 Kindle 自带的电源管理策略。）
+#
+# ── 【核心机制 2：参数注入】 ──────────────────────────────────
+# 解析器会在启动时扫描下方的 {{}} 标签。一旦摄入成功，配置会被固化到系统深处，
+# 而这些标签会从本文件中被自动“抹除”。
+#
+# 请修改以下标签以完成初始化（按需保留）：
+# 
+# [网络与气象节点]
+# 接入WiFi：{{wifi:你的WiFi名称:你的WiFi密码}}
+# 离线静默：{{no_wifi:true}} （彻底切断网络寻址与天气请求）
+# 定位信标：{{weather:beijing}}
+# 
+# [区域与时空标准]
+# 系统语言：{{lang:zh}} (中文) 或 {{lang:en}} (英文)
+# 温度制式：{{unit:C}} 或 {{unit:F}}
+# 计法转换：{{time:24}} 或 {{time:12}}
+# 时区偏移：{{tz:-4}} （如美东夏令时为 -4，北京时间为 8）
+#
+# ── 【备忘录区域】 ──────────────────────────────────────────
+# 在这行分隔线下方，直接写下你今日的待办或随想。
+# 去除标签后，剩下的纯文本将会被直接渲染在电子墨水屏的备忘录区块。
+# 每行最好不要超过 19 个汉字，最多 4 行。
+# ============================================================
+Please open the KDB root directory and edit memo.txt to initialize this software.
+请打开 KDB 插件根目录，修改 memo.txt 以初始化本系统。
+   Λ ︵ Λ
+_〆(・∀・＠)づ∫
