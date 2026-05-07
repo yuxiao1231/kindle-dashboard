@@ -91,4 +91,4 @@ jobs:
             ### 工具说明 / Tools
             - `kdb_splash_tool.exe`: 用于转换 Kindle 启动屏（Splash）的 Windows 桌面小工具。
           draft: false
-          prerelease: false
+          prerelease: falsegit add .
