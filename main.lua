@@ -122,7 +122,14 @@ local function gesture_key(fd, timeout_sec)
         pfd.revents = 0
         local ret = ffi.C.poll(pfd, 1, poll_ms)
 
-        if ret < 0 then break end           -- interrupted / error
+        if ret < 0 then 
+            if ffi.errno() == 4 then
+                goto continue
+            else
+                print("[input] FATAL: poll error " .. tostring(ffi.errno()))
+                break 
+            end
+        end
         if ret == 0 then goto continue end  -- timeout slice → re-check deadline
 
         -- Event ready; blocking read is guaranteed not to stall here
@@ -703,8 +710,7 @@ local function fetch_weather(city, lang, unit)
     d.code1 = sanitize(d.pop1, d.code1)
     d.code2 = sanitize(d.pop2, d.code2)
 
-    local fetched_area = raw:match('"nearest_area".-"value"%s*:%s*"([^"]+)"')
-    d.areaName = fetched_area or city:gsub("_", " ")
+    d.areaName = city:gsub("_", " ")
     d.unit_str  = is_F and "°F" or "°C"
     d.wind_unit = is_F and "mph" or "km/h"
     return d
@@ -1410,61 +1416,62 @@ local function secs_until_local_h(target_h)
 end
 
 local function night_rtc_sleep(config, i18n, wake_epoch)
-    local sleep_secs = math.max(1, math.floor(wake_epoch - os.time()))
+    local sleep_secs = math.floor(wake_epoch - os.time())
+    
+    if sleep_secs < 60 then
+        print("[night] Target too close ("..sleep_secs.."s). Skipping STR to avoid loop traps.")
+        return Input.TIMEOUT
+    end
+
     print(string.format("[night] preparing to sleep for %d seconds...", sleep_secs))
 
     local RTC_RD_TIME = 0x80247009
     local RTC_ALM_SET = 0x40247007
     local RTC_AIE_ON  = 0x7001
+    local RTC_AIE_OFF = 0x7002
 
     local fd = ffi.C.open("/dev/rtc1", 0)
     if fd < 0 then fd = ffi.C.open("/dev/rtc0", 0) end
 
     if fd >= 0 then
         local rt = ffi.new("struct rtc_time")
-        
         if ffi.C.ioctl(fd, RTC_RD_TIME, rt) == 0 then
-            local t = os.date("*t", os.time({
-                year  = rt.tm_year + 1900,
-                month = rt.tm_mon + 1,
-                day   = rt.tm_mday,
-                hour  = rt.tm_hour,
-                min   = rt.tm_min,
-                sec   = rt.tm_sec + sleep_secs
-            }))
-            
-            rt.tm_sec   = t.sec
-            rt.tm_min   = t.min
-            rt.tm_hour  = t.hour
-            rt.tm_mday  = t.day
-            rt.tm_mon   = t.month - 1
-            rt.tm_year  = t.year - 1900
+            local total_sec = rt.tm_sec + sleep_secs
+            rt.tm_sec = total_sec % 60
+            local total_min = rt.tm_min + math.floor(total_sec / 60)
+            rt.tm_min = total_min % 60
+            local total_hour = rt.tm_hour + math.floor(total_min / 60)
+            rt.tm_hour = total_hour % 24
+            rt.tm_mday = rt.tm_mday + math.floor(total_hour / 24)
+            rt.tm_wday, rt.tm_yday, rt.tm_isdst = -1, -1, -1
             
             ffi.C.ioctl(fd, RTC_ALM_SET, rt)
-            ffi.C.ioctl(fd, RTC_AIE_ON, nil)
-            print("[night] FFI hardware alarm set successfully!")
-        else
-            print("[night] ERROR: ioctl read time failed")
+            ffi.C.ioctl(fd, RTC_AIE_ON, 0)
+            print("[night] Hardware alarm armed.")
         end
         ffi.C.close(fd)
-    else
-        print("[night] ERROR: Cannot open /dev/rtc*")
     end
 
     os.execute("stop powerd 2>/dev/null || killall powerd 2>/dev/null; true")
-
     io.flush()
-    os.execute("echo mem > /sys/power/state")
-    
-    os.execute("start powerd 2>/dev/null; true")
 
-    local fd_clean = ffi.C.open("/dev/rtc1", 0)
-    if fd_clean >= 0 then
-        local RTC_AIE_OFF = 0x7002
-        ffi.C.ioctl(fd_clean, RTC_AIE_OFF, nil)
-        ffi.C.close(fd_clean)
+    os.execute("echo mem > /sys/power/state")
+
+    local fd_wake = ffi.C.open("/dev/rtc1", 0)
+    if fd_wake < 0 then fd_wake = ffi.C.open("/dev/rtc0", 0) end
+    if fd_wake >= 0 then
+        ffi.C.ioctl(fd_wake, RTC_AIE_OFF, 0)
+        ffi.C.close(fd_wake)
     end
+
+    os.execute("dd if=/dev/input/event0 of=/dev/null count=1 iflag=nonblock 2>/dev/null")
+    os.execute("dd if=/dev/input/event1 of=/dev/null count=1 iflag=nonblock 2>/dev/null")
+
+    os.execute("eips -f")
+
+    os.execute("start powerd 2>/dev/null; true")
     
+    print("[night] System resumed cleanly. No ghosts, no fog.")
     return Input.TIMEOUT
 end
 
