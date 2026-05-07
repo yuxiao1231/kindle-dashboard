@@ -3,8 +3,8 @@ name: KDB Release Bot
 on:
   push:
     tags:
-      - 'v*' # 原本的：打 Tag 时自动触发
-  workflow_dispatch: # 新加的：允许在 GitHub 网页上手动点击运行
+      - 'v*' # 打 Tag 时自动触发
+  workflow_dispatch: # 允许在 GitHub 网页上手动点击运行
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -19,17 +19,22 @@ jobs:
 
       - name: Create Release Archive
         run: |
-          # 创建一个临时目录用于打包，模拟 Kindle extensgit push origin mainions 结构
-          mkdir -p kdb_v1.0
+          # 动态获取当前的 Tag 名称 (例如 v1.01)
+          VERSION=${{ github.ref_name }}
+          # 如果是手动触发没有Tag，则默认叫 v_latest
+          if [ "$VERSION" = "main" ]; then VERSION="v_latest"; fi
+          
+          # 模拟 Kindle extensions 结构
+          mkdir -p kdb_$VERSION
           # 拷贝必要文件，排除 tools 和 git 相关
-          cp -r bin lib assets main.lua memo.txt README.md LICENSE kdb_v1.0/
-          zip -r kdb-v1.0-kindle.zip kdb_v1.0/
+          cp -r bin lib assets main.lua memo.txt README.md LICENSE kdb_$VERSION/
+          zip -r kdb-$VERSION-kindle.zip kdb_$VERSION/
 
       - name: Upload Kindle Artifact
         uses: actions/upload-artifact@v4
         with:
           name: kindle-package
-          path: kdb-v1.0-kindle.zip
+          path: kdb-*-kindle.zip
 
   build-python-tool:
     name: Build Windows Tool
@@ -57,7 +62,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-tool
-          path: tools/dist/kdb_splash_tool.exe
+          path: tools\dist\kdb_splash_tool.exe
 
   create-release:
     name: Create GitHub Release
@@ -73,13 +78,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            kindle-package/kdb-v1.0-kindle.zip
+            kindle-package/kdb-*-kindle.zip
             windows-tool/kdb_splash_tool.exe
           body: |
-            ## KDB v1.0 Initial Release
+            ## KDB ${{ github.ref_name }} Release
             
             ### 安装说明 / Installation
-            1. 下载 `kdb-v1.0-kindle.zip`。
+            1. 下载 `kdb-${{ github.ref_name }}-kindle.zip`。
             2. 解压并将文件夹放入 Kindle 的 `extensions` 目录。
             3. 修改 `memo.txt` 完成初始化配置。
             
