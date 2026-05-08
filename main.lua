@@ -1470,6 +1470,9 @@ local function night_rtc_sleep(config, i18n, wake_epoch)
     os.execute("eips -f")
 
     os.execute("start powerd 2>/dev/null; true")
+
+    os.execute("sleep 2")
+    os.execute("lipc-set-prop -i com.lab126.powerd preventScreenSaver 1 2>/dev/null")
     
     print("[night] System resumed cleanly. No ghosts, no fog.")
     return Input.TIMEOUT
