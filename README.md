@@ -14,6 +14,12 @@
 
 ---
 
+## 📷 Gallery / 效果展示
+
+![KDB Dashboard on Kindle](picture/1.jpg)
+
+---
+
 ## ⚙️ Power Management & Sleep Schedule / 休眠调度哲学
 
 To maximize standby time while keeping information reasonably fresh, KDB enforces a strict lifecycle:
@@ -33,6 +39,33 @@ As detailed in your `memo.txt`, KDB's behavior is governed by the files present 
 * **Default Dynamic Snapshot / 默认动态恢复**: Takes a framebuffer snapshot (`splash.raw`) on exit to resume seamlessly. / 退出时抓取显存快照，下次启动无缝恢复。
 * **eMMC Saver Mode / 闪存保护模式**: Place a `custom_splash.raw/png` in the root. This overrides the default exit snapshot, significantly reducing write cycles and extending your Kindle's eMMC lifespan. / 根目录下放置自定义快照文件将阻止系统退出时的写操作，大幅降低 eMMC 磨损。
 * **Static Frame Mode / 画框模式**: Drop a `desktop.png` or `desktop.raw` in the root folder. The program will lock into a static photo frame forever. **Warning:** This bypasses native power management completely; exit only via power button reboot. / 根目录下放置该文件将彻底锁定屏幕为静态画框。注意：此模式会暴力切断电源管理，仅限充电使用或长按电源键重启。
+
+---
+
+## 🏗️ Architecture / 系统架构
+
+```mermaid
+graph TD
+    A[KUAL Launcher] -->|Execute| B(start.sh)
+    B -->|Launch| C[main.lua]
+    
+    subgraph Core Engine [KDB Core]
+        C --> D[fbink E-ink Render]
+        C --> E[RTC / Power Management]
+        C --> F[Network / Weather Fetch]
+    end
+    
+    subgraph Data Sources
+        F --> G[wttr.in Weather API]
+        F --> H[memo.txt User Config]
+        F --> I[System Clock]
+    end
+    
+    subgraph Hardware Layer
+        D --> J[E-ink Display]
+        E --> K[/dev/rtc0 /sys/power/state]
+    end
+```
 
 ---
 
