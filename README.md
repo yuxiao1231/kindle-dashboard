@@ -16,7 +16,7 @@
 
 ## 📷 Gallery / 效果展示
 
-![KDB Dashboard on Kindle](picture/1.jpg)
+<img src="picture/1.jpg" width="400" alt="KDB Dashboard on Kindle">
 
 ---
 
@@ -62,8 +62,8 @@ graph TD
     end
     
     subgraph Hardware Layer
-        D --> J[E-ink Display]
-        E --> K[/dev/rtc0 /sys/power/state]
+        D --> J["E-ink Display"]
+        E --> K["/dev/rtc0 & /sys/power/state"]
     end
 ```
 
