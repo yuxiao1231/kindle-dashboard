@@ -42,6 +42,21 @@ As detailed in your `memo.txt`, KDB's behavior is governed by the files present 
 
 ---
 
+## ⚠️ Advanced Wi-Fi Takeover (K4NT) / 硬核网络接管机制
+
+Connecting to modern Wi-Fi networks on legacy Kindle 4 NT firmware poses a unique challenge: the native `wifid` daemon will forcefully kill connections it doesn't recognize and may trigger a Developer Key revocation if it phones home unsuccessfully.
+
+To solve this, KDB implements a **zero-compromise network takeover** encapsulated in `net_manager.lua`:
+为了在不触发开发者密钥吊销的前提下连上现代 Wi-Fi，本项目实现了一套底层的网络接管方案（封装在 `net_manager.lua` 中）：
+
+1. **Daemon Freeze / 守护进程时停**: We freeze the native network manager using `killall -STOP wifid` to prevent it from interfering. / 冻结原生 `wifid` 进程，防止其强行断开我们的连接。
+2. **Direct wpa_cli Injection / 底层联网注入**: We bypass the UI and directly command `wpa_supplicant` via `wpa_cli` to associate with the network. / 绕过上层，直接使用 `wpa_cli` 指挥网卡关联网络。
+3. **DHCP & Gateway Fallback / 网关兜底**: Since `wifid` is frozen, we manually invoke `udhcpc`. If that fails, we mathematically derive and inject a dynamic IPv4 gateway via `route`. / 失去原生 DHCP 后，手动调用 `udhcpc` 并推算注入 IPv4 默认网关。
+4. **DNS Bind Mount / 强制 DNS 劫持**: The Kindle's `/etc` is a read-only filesystem. We construct a custom `resolv.conf` with reliable public DNS servers (1.1.1.1, 114.114.114.114, 8.8.8.8) in `/tmp`, and dynamically inject it over the system's DNS file using a Linux `mount -o bind`. / 利用 Linux 的 bind mount 机制，将 `/tmp` 中生成的自定义 DNS 配置文件强制覆盖挂载到只读的 `/etc/resolv.conf` 上。
+5. **Direct IPv4 Bypass / 极致直连兜底**: If DNS resolution still times out, the weather fetcher falls back to a direct IPv4 request to the API server, completely bypassing the need for DNS. / 即使 DNS 解析彻底瘫痪，请求也会回退到直接通过 IPv4 地址访问 API 接口，确保网络连通率。
+
+---
+
 ## 🏗️ Architecture / 系统架构
 
 ```mermaid
