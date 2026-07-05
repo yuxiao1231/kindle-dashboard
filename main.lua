@@ -500,46 +500,203 @@ end
 
 local function force_full_refresh() _last_full_h = -1 end
 
--- WiFi control via wifid LIPC
+-- WiFi control via wifid LIPC + wpa_supplicant direct check
 local function is_wifi_connected()
-    return sh("lipc-get-prop com.lab126.wifid cmState 2>/dev/null") == "CONNECTED"
+    -- Check wifid first (native Kindle path)
+    if sh("lipc-get-prop com.lab126.wifid cmState 2>/dev/null") == "CONNECTED" then
+        return true
+    end
+    -- Fallback: check wpa_supplicant directly (needed when we bypass wifid via wpa_cli)
+    local wpa_status = sh("wpa_cli -i wlan0 status 2>/dev/null")
+    if wpa_status and wpa_status:match("wpa_state=COMPLETED") then
+        return true
+    end
+    return false
 end
 
-local function wifi_on()
-    print("[net] Waking up native wifid...")
-    os.execute("lipc-set-prop com.lab126.wifid enable 1 2>/dev/null")
+-- Post-association DHCP and gateway handling (shared by both connection paths)
+local function ensure_dhcp()
+    print("[net] Enforcing DNS bind mount...")
+    os.execute("echo 'nameserver 1.1.1.1' > /tmp/resolv.conf")
+    os.execute("echo 'nameserver 114.114.114.114' >> /tmp/resolv.conf")
+    os.execute("echo 'nameserver 8.8.8.8' >> /tmp/resolv.conf")
+    os.execute("mount -o bind /tmp/resolv.conf /etc/resolv.conf 2>/dev/null")
+
+    local gw = sh("ip route | grep default | awk '{print $3}' 2>/dev/null")
+    if gw and gw:match("%d+%.%d+%.%d+%.%d+") then
+        print("[net] Native gateway found.")
+        return true
+    end
+    -- Try udhcpc explicitly (wifid might not trigger DHCP for wpa_cli connections)
+    print("[net] No gateway found, trying udhcpc...")
+    os.execute("udhcpc -i wlan0 -t 5 -n -q 2>/dev/null")
+    os.execute("sleep 1")
+    gw = sh("route -n | grep '^0.0.0.0'")
+    if gw and gw ~= "" then
+        print("[net] udhcpc gateway acquired.")
+        return true
+    end
+    -- DHCP gateway still missing; inject a best-guess default route
+    print("[net] DHCP missing, injecting fallback...")
+    local ip_str = sh("ifconfig wlan0 | awk '/inet addr/{print substr($2,6)}'")
+    if ip_str and ip_str ~= "" then
+        local prefix = ip_str:match("^(%d+%.%d+%.%d+%.)")
+        if prefix then
+            local dyn_gw = prefix .. "1"
+            print("[net] Injected Dynamic Gateway: " .. dyn_gw)
+            os.execute("route add default gw " .. dyn_gw .. " dev wlan0 2>/dev/null")
+            print("[net] DNS successfully injected via bind mount.")
+        end
+    end
+    return true
+end
+
+-- Encode string to hex for wpa_cli (avoids all shell escaping issues)
+local function str_to_hex(s)
+    return (s:gsub(".", function(c) return string.format("%02x", string.byte(c)) end))
+end
+
+-- Try connecting with explicit SSID/password via wpa_cli
+local function wifi_try_wpa_cli(ssid, pw)
+    print("[net] wpa_cli: attempting to connect → " .. ssid)
+
+    -- Wait for wpa_supplicant to become ready (it lags behind wifid enable)
+    local raw_id
+    for attempt = 1, 10 do
+        raw_id = sh("wpa_cli -i wlan0 add_network 2>/dev/null")
+        if raw_id and raw_id:match("%d+") then break end
+        print("[net] wpa_cli: wpa_supplicant not ready, retry " .. attempt .. "/10")
+        os.execute("sleep 1")
+        raw_id = nil
+    end
+    if not raw_id then
+        print("[net] wpa_cli: add_network failed after retries.")
+        return false
+    end
+    local net_id = raw_id:match("(%d+)")
+    if not net_id then
+        print("[net] wpa_cli: unexpected add_network response: " .. tostring(raw_id))
+        return false
+    end
+    print("[net] wpa_cli: allocated network id=" .. net_id)
+
+    -- Set SSID using quoted ASCII (avoids hex parsing bugs in older wpa_cli)
+    local safe_ssid = ssid:gsub("'", "'\\''")
+    local r1 = sh(string.format("wpa_cli -i wlan0 set_network %s ssid '\"%s\"' 2>/dev/null", net_id, safe_ssid))
+    print("[net] wpa_cli: set_network ssid → " .. tostring(r1))
+    if r1 ~= "OK" then
+        os.execute(string.format("wpa_cli -i wlan0 remove_network %s 2>/dev/null", net_id))
+        return false
+    end
+
+    -- Explicitly set security and mode parameters for older wpa_supplicant
+    sh("wpa_cli -i wlan0 ap_scan 1 2>/dev/null") -- FORCE wpa_supplicant to actively scan!
+    sh(string.format("wpa_cli -i wlan0 set_network %s auth_alg OPEN 2>/dev/null", net_id))
+    sh(string.format("wpa_cli -i wlan0 set_network %s mode 0 2>/dev/null", net_id))
+    sh(string.format("wpa_cli -i wlan0 set_network %s scan_ssid 1 2>/dev/null", net_id))
+
+    -- Set PSK (password) or open mode
+    if pw and pw ~= "" and pw ~= "nil" then
+        -- Force WPA2 Personal (RSN/WPA-PSK/CCMP)
+        sh(string.format("wpa_cli -i wlan0 set_network %s key_mgmt WPA-PSK 2>/dev/null", net_id))
+        sh(string.format("wpa_cli -i wlan0 set_network %s proto \"RSN\" 2>/dev/null", net_id))
+        sh(string.format("wpa_cli -i wlan0 set_network %s pairwise CCMP 2>/dev/null", net_id))
+        sh(string.format("wpa_cli -i wlan0 set_network %s group CCMP 2>/dev/null", net_id))
+        
+        -- Direct wpa_cli command-line mode with shell-safe quoting
+        -- wpa_cli expects: set_network N psk "passphrase"
+        local safe_pw = pw:gsub("'", "'\\''")
+        local r2 = sh(string.format(
+            "wpa_cli -i wlan0 set_network %s psk '\"%s\"' 2>/dev/null",
+            net_id, safe_pw
+        ))
+        print("[net] wpa_cli: set_network psk → " .. tostring(r2))
+        if r2 ~= "OK" then
+            os.execute(string.format("wpa_cli -i wlan0 remove_network %s 2>/dev/null", net_id))
+            return false
+        end
+    else
+        sh(string.format("wpa_cli -i wlan0 set_network %s key_mgmt NONE 2>/dev/null", net_id))
+    end
+
+    -- Explicitly fight wifid to force connection (older wpa_supplicant)
+    sh(string.format("wpa_cli -i wlan0 enable_network %s 2>/dev/null", net_id))
+    sh("wpa_cli -i wlan0 disconnect 2>/dev/null")
+    sh(string.format("wpa_cli -i wlan0 select_network %s 2>/dev/null", net_id))
+    sh("wpa_cli -i wlan0 scan 2>/dev/null")
+    sh("wpa_cli -i wlan0 reconnect 2>/dev/null")
+    print("[net] wpa_cli: network selected and scanning forced...")
+
     for i = 1, WIFI_HALF do
-        if is_wifi_connected() then
-            print("[net] AP CONNECTED. Waiting 3s for DHCP...")
-            os.execute("sleep 3")
-            local gw = sh("route -n | grep '^0.0.0.0'")
-            if gw and gw ~= "" then
-                print("[net] Native gateway found.")
-                return true
-            end
-            -- DHCP gateway missing; inject a best-guess default route
-            print("[net] DHCP missing, injecting fallback...")
-            local ip_str = sh("ifconfig wlan0 | awk '/inet addr/{print substr($2,6)}'")
-            if ip_str and ip_str ~= "" then
-                local prefix = ip_str:match("^(%d+%.%d+%.%d+%.)")
-                if prefix then
-                    local dyn_gw = prefix .. "1"
-                    print("[net] Injected Dynamic Gateway: " .. dyn_gw)
-                    os.execute("route add default gw " .. dyn_gw .. " dev wlan0 2>/dev/null")
-                    os.execute("echo 'nameserver 8.8.8.8' > /tmp/resolv.conf")
-                    os.execute("cat /tmp/resolv.conf > /etc/resolv.conf 2>/dev/null")
-                end
-            end
-            return true
+        -- Only check wpa_supplicant directly, because wifid is frozen!
+        local state = sh("wpa_cli -i wlan0 status 2>/dev/null | grep wpa_state")
+        if state and state:match("COMPLETED") then
+            return ensure_dhcp()
+        end
+        -- Log wpa_supplicant state every 5 seconds for debugging
+        if i % 5 == 0 then
+            print("[net] wpa_cli: poll " .. i .. "s - " .. (state or "unknown"))
         end
         os.execute("sleep 1")
     end
-    print("[net] WARN: Wi-Fi connection timeout.")
+
+    -- Failed; dump final status and scan results for debugging
+    local final_status = sh("wpa_cli -i wlan0 status 2>/dev/null")
+    local scan_results = sh("wpa_cli -i wlan0 scan_results 2>/dev/null")
+    print("[net] wpa_cli: FINAL STATUS:\n" .. (final_status or "unavailable"))
+    print("[net] wpa_cli: SCAN RESULTS:\n" .. (scan_results or "none"))
+
+    -- Clean up the added network
+    print("[net] wpa_cli: connection timed out for " .. ssid)
+    os.execute(string.format("wpa_cli -i wlan0 remove_network %s 2>/dev/null", net_id))
+    -- Re-enable all saved networks (select_network disables everything else)
+    os.execute("wpa_cli -i wlan0 enable_network all 2>/dev/null")
+    return false
+end
+
+-- Main WiFi connection orchestrator.
+-- Priority 1: config.json credentials via wpa_cli
+-- Priority 2: Kindle native saved networks
+local function wifi_on(config)
+    print("[net] Waking up native wifid...")
+    os.execute("lipc-set-prop com.lab126.wifid enable 1 2>/dev/null")
+    os.execute("sleep 3")  -- give wlan0 and wpa_supplicant time to initialize
+
+    -- FREEZE wifid so it stops aggressively disconnecting our wpa_cli network!
+    os.execute("killall -STOP wifid 2>/dev/null")
+    print("[net] wifid frozen to prevent interference.")
+
+    -- Priority 1: try config.json credentials
+    if config and config.wifi_ssid
+       and config.wifi_ssid ~= "" and config.wifi_ssid ~= "nil" then
+        if wifi_try_wpa_cli(config.wifi_ssid, config.wifi_pw) then
+            -- DO NOT unfreeze wifid here! It will detect an unknown network and kill it!
+            -- We keep it frozen until fetch_weather is done, then unfreeze it in wifi_off.
+            return true
+        end
+        print("[net] Config credentials failed; falling back to saved networks.")
+    end
+
+    -- Unfreeze wifid before trying native fallback
+    os.execute("killall -CONT wifid 2>/dev/null")
+
+    -- Priority 2: Kindle native saved networks (wifid auto-reconnect)
+    print("[net] Trying Kindle saved networks...")
+    os.execute("wpa_cli -i wlan0 reassociate 2>/dev/null")
+    for i = 1, WIFI_HALF do
+        if is_wifi_connected() then
+            return ensure_dhcp()
+        end
+        os.execute("sleep 1")
+    end
+    print("[net] WARN: All Wi-Fi connection methods exhausted.")
     return false
 end
 
 local function wifi_off()
     print("[net] Putting wifid to sleep...")
+    os.execute("umount /etc/resolv.conf 2>/dev/null")
+    os.execute("killall -CONT wifid 2>/dev/null")
     os.execute("lipc-set-prop com.lab126.wifid enable 0 2>/dev/null || true")
 end
 
@@ -629,8 +786,23 @@ end
 
 local function fetch_weather(city, lang, unit)
     local url = "http://wttr.in/" .. city:gsub(" ","_") .. "?format=j1&lang=" .. (lang or "en")
-    local curl_cmd = string.format('curl -L -s -D /tmp/kdb_hdr.txt -m %d -o "%s" "%s"', WEATHER_TIMEOUT, WEATHER_CACHE, url)
-    os.execute(curl_cmd)
+    local curl_cmd = string.format('curl -k -L -s -D /tmp/kdb_hdr.txt -m %d -o "%s" "%s" 2>/tmp/curl_err.txt', WEATHER_TIMEOUT, WEATHER_CACHE, url)
+    local ret = os.execute(curl_cmd)
+    
+    if ret ~= 0 then
+        local err = sh("cat /tmp/curl_err.txt 2>/dev/null")
+        print("[net] ERROR: curl failed with code " .. tostring(ret) .. ". stderr: " .. (err or ""))
+        print("[net] Attempting direct IP fallback bypass (5.9.243.187)...")
+        
+        local fb_url = "http://5.9.243.187/" .. city:gsub(" ","_") .. "?format=j1&lang=" .. (lang or "en")
+        local fb_cmd = string.format('curl -H "Host: wttr.in" -k -L -s -D /tmp/kdb_hdr.txt -m %d -o "%s" "%s" 2>/tmp/curl_err.txt', WEATHER_TIMEOUT, WEATHER_CACHE, fb_url)
+        ret = os.execute(fb_cmd)
+        
+        if ret ~= 0 then
+            err = sh("cat /tmp/curl_err.txt 2>/dev/null")
+            print("[net] ERROR: Fallback curl also failed with code " .. tostring(ret) .. ". stderr: " .. (err or ""))
+        end
+    end
 
     -- Opportunistic time sync from the HTTP response Date header
     local hf = io.open("/tmp/kdb_hdr.txt", "r")
@@ -666,6 +838,17 @@ local function fetch_weather(city, lang, unit)
     d.min2, d.max2 = mins[3] or "--", maxs[3] or "--"
     d.temp = d.min0 .. " / " .. d.max0
 
+    local function shorten_desc(s)
+        if not s then return "" end
+        local l = s:lower()
+        if l:match("rain") or l:match("drizzle") or l:match("shower") then return "Rain" end
+        if l:match("snow") then return "Snow" end
+        if l:match("thunder") or l:match("storm") then return "Storm" end
+        if l:match("cloud") or l:match("overcast") then return "Cloudy" end
+        if #s > 15 then return s:sub(1, 12) .. "..." end
+        return s
+    end
+
     local weather_only = raw:match('"weather"%s*:%s*%[(.*)')
     if weather_only then
         local pops, codes, descs = {}, {}, {}
@@ -687,8 +870,8 @@ local function fetch_weather(city, lang, unit)
         d.code     = codes[5] or "113"
         d.desc     = descs[5] or "Unknown"
 
-        d.pop1, d.code1, d.desc1 = pops[13] or "0", codes[13] or "113", descs[13] or ""
-        d.pop2, d.code2, d.desc2 = pops[21] or "0", codes[21] or "113", descs[21] or ""
+        d.pop1, d.code1, d.desc1 = pops[13] or "0", codes[13] or "113", shorten_desc(descs[13] or "")
+        d.pop2, d.code2, d.desc2 = pops[21] or "0", codes[21] or "113", shorten_desc(descs[21] or "")
     else
         d.feels, d.humidity, d.wind, d.code, d.desc = "--", "--", "--", "113", "Unknown"
         d.pop1, d.code1, d.desc1 = "0", "113", ""
@@ -1225,7 +1408,7 @@ local function long_cycle(config, memo_lines, i18n)
     elseif not city or city == "" then
         is_offline_mode = true
     else
-        local connected = wifi_on()
+        local connected = wifi_on(config)
         if connected then
             w_data = fetch_weather(city, lang, config.unit)
         end
@@ -1457,6 +1640,21 @@ local function night_rtc_sleep(config, i18n, wake_epoch)
 
     os.execute("echo mem > /sys/power/state")
 
+    -- ★ FIX: Sync clocks after Suspend-to-RAM.
+    -- Direction depends on RTC health: if RTC is dead (year < 2020), write
+    -- the system clock INTO the RTC. Otherwise read RTC INTO the system clock.
+    local rtc_year = sh("cat /sys/class/rtc/rtc1/date 2>/dev/null || cat /sys/class/rtc/rtc0/date 2>/dev/null")
+    local ry = rtc_year and tonumber(rtc_year:match("(%d+)")) or 0
+    if ry >= 2020 then
+        -- RTC looks valid; sync system FROM RTC (fix stale kernel clock)
+        os.execute("hwclock -s -u 2>/dev/null || hwclock -s --utc 2>/dev/null")
+        print("[night] Post-resume: kernel clock synced FROM RTC (" .. tostring(rtc_year) .. ")")
+    else
+        -- RTC is dead/reset (1970); write system clock TO RTC to keep it alive
+        os.execute("hwclock -w -u 2>/dev/null || hwclock -w --utc 2>/dev/null")
+        print("[night] Post-resume: RTC dead (" .. tostring(rtc_year) .. "), wrote system clock TO RTC.")
+    end
+
     local fd_wake = ffi.C.open("/dev/rtc1", 0)
     if fd_wake < 0 then fd_wake = ffi.C.open("/dev/rtc0", 0) end
     if fd_wake >= 0 then
@@ -1476,6 +1674,57 @@ local function night_rtc_sleep(config, i18n, wake_epoch)
     
     print("[night] System resumed cleanly. No ghosts, no fog.")
     return Input.TIMEOUT
+end
+
+-- Defensive RTC drift detection: compare system clock with RTC via sysfs.
+-- Uses /sys/class/rtc/rtcN/date and /sys/class/rtc/rtcN/time which return
+-- human-readable UTC strings, avoiding ioctl/FFI and os.time() timezone pitfalls.
+local function try_rtc_time_sync()
+    local rtc_date = sh("cat /sys/class/rtc/rtc1/date 2>/dev/null")
+                  or sh("cat /sys/class/rtc/rtc0/date 2>/dev/null")
+    local rtc_time = sh("cat /sys/class/rtc/rtc1/time 2>/dev/null")
+                  or sh("cat /sys/class/rtc/rtc0/time 2>/dev/null")
+    if not rtc_date or not rtc_time then return end
+
+    -- sysfs format: date="2026-07-05", time="19:47:18"
+    local ry, rm, rd = rtc_date:match("(%d+)-(%d+)-(%d+)")
+    local rh = rtc_time:match("(%d+):")
+    if not ry or not rh then return end
+    ry = tonumber(ry)
+
+    -- System clock (force UTC with "!" prefix)
+    local sys = os.date("!*t")
+
+    -- Determine which clock is trustworthy
+    local sys_valid = sys.year >= 2020
+    local rtc_valid = ry >= 2020
+
+    if sys_valid and not rtc_valid then
+        -- RTC is dead (e.g. 1970); write system clock TO RTC
+        print(string.format("[time] RTC dead (%s). Writing system clock TO RTC.", rtc_date))
+        os.execute("hwclock -w -u 2>/dev/null || hwclock -w --utc 2>/dev/null")
+    elseif rtc_valid and not sys_valid then
+        -- System clock is wrong; read RTC INTO system
+        print(string.format("[time] System clock bad (%04d). Syncing FROM RTC (%s).", sys.year, rtc_date))
+        os.execute("hwclock -s -u 2>/dev/null || hwclock -s --utc 2>/dev/null")
+    elseif rtc_valid and sys_valid then
+        -- Both look valid; check for significant drift
+        local m_diff = math.abs(sys.month - tonumber(rm))
+        local d_diff = math.abs(sys.day   - tonumber(rd))
+        local h_diff = math.abs(sys.hour  - tonumber(rh))
+        if h_diff > 12 then h_diff = 24 - h_diff end
+        if math.abs(sys.year - ry) > 0 or m_diff > 0 or d_diff > 1 or h_diff > 1 then
+            -- Prefer the more recent time (likely system clock was synced via NTP/HTTP)
+            if sys.year > ry or (sys.year == ry and sys.month > tonumber(rm)) then
+                print(string.format("[time] DRIFT: SYS > RTC. Writing system TO RTC."))
+                os.execute("hwclock -w -u 2>/dev/null || hwclock -w --utc 2>/dev/null")
+            else
+                print(string.format("[time] DRIFT: RTC > SYS. Syncing FROM RTC."))
+                os.execute("hwclock -s -u 2>/dev/null || hwclock -s --utc 2>/dev/null")
+            end
+        end
+    end
+    -- Both invalid: do nothing, can't trust either
 end
 
 local function main()
@@ -1509,6 +1758,9 @@ local function main()
                 update_bottom_bar(i18n.batt .. ": " .. _cached_batt .. "%", false, true)
             end
         end
+
+        -- Defensive: detect and fix kernel clock drift from RTC every iteration
+        try_rtc_time_sync()
 
         local did_refresh = false
         if needs_full_refresh() then
