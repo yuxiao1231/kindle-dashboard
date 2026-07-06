@@ -220,11 +220,16 @@ function NetManager.fetch_weather(city, lang, unit)
     local function shorten_desc(s)
         if not s then return "" end
         local l = s:lower()
-        if l:match("rain") or l:match("drizzle") or l:match("shower") then return "Rain" end
-        if l:match("snow") then return "Snow" end
         if l:match("thunder") or l:match("storm") then return "Storm" end
+        if l:match("snow") and l:match("rain") then return "Sleet" end
+        if l:match("rain") or l:match("drizzle") or l:match("shower") then return "Rain" end
+        if l:match("snow") or l:match("blizzard") then return "Snow" end
+        if l:match("sleet") or l:match("ice") or l:match("hail") or l:match("freez") then return "Ice" end
+        if l:match("fog") or l:match("mist") or l:match("haze") then return "Fog" end
         if l:match("cloud") or l:match("overcast") then return "Cloudy" end
-        if #s > 15 then return s:sub(1, 12) .. "..." end
+        if l:match("sunny") or l:match("clear") then return "Clear" end
+        if l:match("partly") then return "Partly" end
+        if #s > 12 then return s:sub(1, 10) .. ".." end
         return s
     end
 
@@ -247,7 +252,7 @@ function NetManager.fetch_weather(city, lang, unit)
         d.humidity = hums[5] or "--"
         d.wind     = winds[5] or "--"
         d.code     = codes[5] or "113"
-        d.desc     = descs[5] or "Unknown"
+        d.desc     = shorten_desc(descs[5] or "Unknown")
 
         d.pop1, d.code1, d.desc1 = pops[13] or "0", codes[13] or "113", shorten_desc(descs[13] or "")
         d.pop2, d.code2, d.desc2 = pops[21] or "0", codes[21] or "113", shorten_desc(descs[21] or "")
