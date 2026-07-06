@@ -1295,53 +1295,129 @@ local function night_rtc_sleep(config, i18n, wake_epoch)
 
     print(string.format("[night] preparing to sleep for %d seconds...", sleep_secs))
 
-    local RTC_RD_TIME = 0x80247009
-    local RTC_ALM_SET = 0x40247007
-    local RTC_AIE_ON  = 0x7001
-    local RTC_AIE_OFF = 0x7002
+    -- ★ Pre-flight: check if RTC is alive before attempting hardware sleep.
+    -- If the RTC battery is dead (reads 1970), the hardware alarm will never
+    -- fire and the device will be stuck in Suspend-to-RAM forever.
+    local rtc_date_pre = sh("cat /sys/class/rtc/rtc1/date 2>/dev/null || cat /sys/class/rtc/rtc0/date 2>/dev/null")
+    local rtc_year_pre = rtc_date_pre and tonumber(rtc_date_pre:match("(%d+)")) or 0
+    local rtc_alive = (rtc_year_pre >= 2020)
 
-    local fd = ffi.C.open("/dev/rtc1", 0)
-    if fd < 0 then fd = ffi.C.open("/dev/rtc0", 0) end
+    if not rtc_alive then
+        -- RTC is dead. Cannot use Suspend-to-RAM (alarm won't fire).
+        -- Fall back to software-only sleep: CPU stays on in low-power poll.
+        print(string.format("[night] RTC dead (%s). Using software sleep fallback (%ds).",
+              tostring(rtc_date_pre), sleep_secs))
+        -- Cap software sleep to avoid excessive wait if clock is wrong
+        local capped = math.min(sleep_secs, 4 * 3600)  -- max 4 hours
+        return Input.get_gesture(capped)
+    end
 
-    if fd >= 0 then
-        local rt = ffi.new("struct rtc_time")
-        if ffi.C.ioctl(fd, RTC_RD_TIME, rt) == 0 then
-            local total_sec = rt.tm_sec + sleep_secs
-            rt.tm_sec = total_sec % 60
-            local total_min = rt.tm_min + math.floor(total_sec / 60)
-            rt.tm_min = total_min % 60
-            local total_hour = rt.tm_hour + math.floor(total_min / 60)
-            rt.tm_hour = total_hour % 24
-            rt.tm_mday = rt.tm_mday + math.floor(total_hour / 24)
-            rt.tm_wday, rt.tm_yday, rt.tm_isdst = -1, -1, -1
-            
-            ffi.C.ioctl(fd, RTC_ALM_SET, rt)
-            ffi.C.ioctl(fd, RTC_AIE_ON, 0)
-            print("[night] Hardware alarm armed.")
+    -- RTC is alive — proceed with hardware Suspend-to-RAM
+
+    -- Strategy 1: Try sysfs wakealarm (epoch-based, most reliable)
+    local wa_path = find_rtc_path()
+    local alarm_set = false
+    if wa_path then
+        -- Clear any stale alarm, then write the target epoch
+        rtc_write(wa_path, "0")
+        alarm_set = rtc_write(wa_path, tostring(math.floor(wake_epoch)))
+        if alarm_set then
+            print("[night] Sysfs wakealarm armed via " .. wa_path)
         end
-        ffi.C.close(fd)
+    end
+
+    -- Strategy 2: Fallback to ioctl RTC_ALM_SET (relative time offset)
+    if not alarm_set then
+        local RTC_RD_TIME = 0x80247009
+        local RTC_ALM_SET = 0x40247007
+        local RTC_AIE_ON  = 0x7001
+
+        local fd = ffi.C.open("/dev/rtc1", 0)
+        if fd < 0 then fd = ffi.C.open("/dev/rtc0", 0) end
+
+        if fd >= 0 then
+            local rt = ffi.new("struct rtc_time")
+            if ffi.C.ioctl(fd, RTC_RD_TIME, rt) == 0 then
+                local total_sec = rt.tm_sec + sleep_secs
+                rt.tm_sec = total_sec % 60
+                local total_min = rt.tm_min + math.floor(total_sec / 60)
+                rt.tm_min = total_min % 60
+                local total_hour = rt.tm_hour + math.floor(total_min / 60)
+                rt.tm_hour = total_hour % 24
+                rt.tm_mday = rt.tm_mday + math.floor(total_hour / 24)
+                rt.tm_wday, rt.tm_yday, rt.tm_isdst = -1, -1, -1
+                
+                ffi.C.ioctl(fd, RTC_ALM_SET, rt)
+                ffi.C.ioctl(fd, RTC_AIE_ON, 0)
+                alarm_set = true
+                print("[night] Hardware alarm armed via ioctl.")
+            end
+            ffi.C.close(fd)
+        end
+    end
+
+    if not alarm_set then
+        -- Neither method worked; do NOT enter STR or we'll freeze forever.
+        print("[night] WARN: Could not arm any RTC alarm. Using software sleep.")
+        return Input.get_gesture(math.min(sleep_secs, 4 * 3600))
     end
 
     os.execute("stop powerd 2>/dev/null || killall powerd 2>/dev/null; true")
     io.flush()
 
+    -- ★ Pre-STR: Save a time checkpoint so we can recover if RTC is dead.
+    -- We save both the current time AND the expected wake time. On resume,
+    -- if the kernel clock got corrupted by a dead RTC, we restore wake_epoch
+    -- as the best estimate of "now" (we just woke up at the target time).
+    local checkpoint_path = "/tmp/kdb_time_checkpoint"
+    local cpf = io.open(checkpoint_path, "w")
+    if cpf then
+        cpf:write(string.format("%d %d\n", os.time(), math.floor(wake_epoch)))
+        cpf:close()
+    end
+
     os.execute("echo mem > /sys/power/state")
 
-    -- ★ FIX: Sync clocks after Suspend-to-RAM.
-    -- Direction depends on RTC health: if RTC is dead (year < 2020), write
-    -- the system clock INTO the RTC. Otherwise read RTC INTO the system clock.
+    -- ★ Post-resume: Recover system clock.
+    -- The kernel auto-syncs from RTC on resume. If RTC is dead, the kernel
+    -- clock is now garbage (epoch 1970). We detect this and restore from
+    -- our saved checkpoint.
     local rtc_year = sh("cat /sys/class/rtc/rtc1/date 2>/dev/null || cat /sys/class/rtc/rtc0/date 2>/dev/null")
     local ry = rtc_year and tonumber(rtc_year:match("(%d+)")) or 0
-    if ry >= 2020 then
-        -- RTC looks valid; sync system FROM RTC (fix stale kernel clock)
+    local sys_year = tonumber(os.date("!%Y")) or 0
+
+    if sys_year < 2020 then
+        -- System clock is corrupted. Restore from checkpoint.
+        local restored = false
+        local rf = io.open(checkpoint_path, "r")
+        if rf then
+            local line = rf:read("*l"); rf:close()
+            if line then
+                local saved_now, saved_wake = line:match("(%d+)%s+(%d+)")
+                if saved_wake then
+                    -- Best estimate: we woke up at wake_epoch
+                    local restore_epoch = tonumber(saved_wake)
+                    local date_cmd = os.date("!%m%d%H%M%Y.%S", restore_epoch)
+                    os.execute("date " .. date_cmd .. " 2>/dev/null")
+                    os.execute("hwclock -w -u 2>/dev/null")
+                    print(string.format("[night] Post-resume: Clock restored from checkpoint (epoch %d → %s)",
+                          restore_epoch, os.date("!%Y-%m-%d %H:%M:%S", restore_epoch)))
+                    restored = true
+                end
+            end
+        end
+        if not restored then
+            print("[night] Post-resume: Clock corrupted and no checkpoint found!")
+        end
+    elseif ry >= 2020 then
         os.execute("hwclock -s -u 2>/dev/null || hwclock -s --utc 2>/dev/null")
         print("[night] Post-resume: kernel clock synced FROM RTC (" .. tostring(rtc_year) .. ")")
     else
-        -- RTC is dead/reset (1970); write system clock TO RTC to keep it alive
         os.execute("hwclock -w -u 2>/dev/null || hwclock -w --utc 2>/dev/null")
-        print("[night] Post-resume: RTC dead (" .. tostring(rtc_year) .. "), wrote system clock TO RTC.")
+        print("[night] Post-resume: RTC dead but system clock OK, wrote TO RTC.")
     end
 
+    local RTC_AIE_OFF = 0x7002
     local fd_wake = ffi.C.open("/dev/rtc1", 0)
     if fd_wake < 0 then fd_wake = ffi.C.open("/dev/rtc0", 0) end
     if fd_wake >= 0 then
@@ -1411,7 +1487,24 @@ local function try_rtc_time_sync()
             end
         end
     end
-    -- Both invalid: do nothing, can't trust either
+    -- Both invalid: last resort — try to restore from checkpoint file
+    if not sys_valid and not rtc_valid then
+        local rf = io.open("/tmp/kdb_time_checkpoint", "r")
+        if rf then
+            local line = rf:read("*l"); rf:close()
+            if line then
+                local _, saved_wake = line:match("(%d+)%s+(%d+)")
+                if saved_wake then
+                    local restore_epoch = tonumber(saved_wake)
+                    local date_cmd = os.date("!%m%d%H%M%Y.%S", restore_epoch)
+                    os.execute("date " .. date_cmd .. " 2>/dev/null")
+                    os.execute("hwclock -w -u 2>/dev/null")
+                    print(string.format("[time] Both clocks dead. Restored from checkpoint → %s",
+                          os.date("!%Y-%m-%d %H:%M:%S", restore_epoch)))
+                end
+            end
+        end
+    end
 end
 
 local function main()
