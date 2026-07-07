@@ -494,6 +494,10 @@ local _last_full_h  = -1
 
 local function needs_full_refresh()
     if _last_full_h == -1 then return true end
+    -- Safety: if system clock is obviously wrong (epoch), force a refresh
+    -- so that long_cycle can re-sync time via network.
+    local sys_year = tonumber(os.date("!%Y")) or 0
+    if sys_year < 2020 then return true end
     local h = tonumber(local_date("%H")) or 0
     return REFRESH_HOURS[h] and (h ~= _last_full_h)
 end
@@ -1442,6 +1446,15 @@ end
 -- Defensive RTC drift detection: compare system clock with RTC via sysfs.
 -- Uses /sys/class/rtc/rtcN/date and /sys/class/rtc/rtcN/time which return
 -- human-readable UTC strings, avoiding ioctl/FFI and os.time() timezone pitfalls.
+--
+-- IMPORTANT: The RTC battery on many K4NT units is permanently dead.
+-- We cache this fact after the first detection + one write attempt,
+-- so we don't spam hwclock every 60 seconds (which would flood the log
+-- and waste CPU on a write that can never persist).
+local _rtc_known_dead  = false   -- set true once we've tried and failed
+local _rtc_write_epoch = 0       -- last time we attempted hwclock -w
+local RTC_WRITE_INTERVAL = 3600  -- retry hwclock -w at most once per hour
+
 local function try_rtc_time_sync()
     local rtc_date = sh("cat /sys/class/rtc/rtc1/date 2>/dev/null")
                   or sh("cat /sys/class/rtc/rtc0/date 2>/dev/null")
@@ -1449,45 +1462,54 @@ local function try_rtc_time_sync()
                   or sh("cat /sys/class/rtc/rtc0/time 2>/dev/null")
     if not rtc_date or not rtc_time then return end
 
-    -- sysfs format: date="2026-07-05", time="19:47:18"
     local ry, rm, rd = rtc_date:match("(%d+)-(%d+)-(%d+)")
     local rh = rtc_time:match("(%d+):")
     if not ry or not rh then return end
     ry = tonumber(ry)
 
-    -- System clock (force UTC with "!" prefix)
     local sys = os.date("!*t")
-
-    -- Determine which clock is trustworthy
     local sys_valid = sys.year >= 2020
     local rtc_valid = ry >= 2020
 
     if sys_valid and not rtc_valid then
-        -- RTC is dead (e.g. 1970); write system clock TO RTC
-        print(string.format("[time] RTC dead (%s). Writing system clock TO RTC.", rtc_date))
-        os.execute("hwclock -w -u 2>/dev/null || hwclock -w --utc 2>/dev/null")
-    elseif rtc_valid and not sys_valid then
-        -- System clock is wrong; read RTC INTO system
+        -- RTC is dead. Only attempt hwclock write at most once per hour.
+        if not _rtc_known_dead then
+            -- First detection this session: attempt one write and log it
+            print(string.format("[time] RTC dead (%s). Attempting hwclock write (one-time).", rtc_date))
+            os.execute("hwclock -w -u 2>/dev/null || hwclock -w --utc 2>/dev/null")
+            _rtc_write_epoch = os.time()
+            _rtc_known_dead  = true
+        elseif (os.time() - _rtc_write_epoch) > RTC_WRITE_INTERVAL then
+            -- Periodic retry (once per hour) in case RTC comes back to life
+            os.execute("hwclock -w -u 2>/dev/null || hwclock -w --utc 2>/dev/null")
+            _rtc_write_epoch = os.time()
+        end
+        -- else: silently skip — RTC is known dead, no point spamming
+        return
+    end
+
+    -- If RTC is now valid, clear the "known dead" flag
+    if rtc_valid then _rtc_known_dead = false end
+
+    if rtc_valid and not sys_valid then
         print(string.format("[time] System clock bad (%04d). Syncing FROM RTC (%s).", sys.year, rtc_date))
         os.execute("hwclock -s -u 2>/dev/null || hwclock -s --utc 2>/dev/null")
     elseif rtc_valid and sys_valid then
-        -- Both look valid; check for significant drift
         local m_diff = math.abs(sys.month - tonumber(rm))
         local d_diff = math.abs(sys.day   - tonumber(rd))
         local h_diff = math.abs(sys.hour  - tonumber(rh))
         if h_diff > 12 then h_diff = 24 - h_diff end
         if math.abs(sys.year - ry) > 0 or m_diff > 0 or d_diff > 1 or h_diff > 1 then
-            -- Prefer the more recent time (likely system clock was synced via NTP/HTTP)
             if sys.year > ry or (sys.year == ry and sys.month > tonumber(rm)) then
-                print(string.format("[time] DRIFT: SYS > RTC. Writing system TO RTC."))
+                print("[time] DRIFT: SYS > RTC. Writing system TO RTC.")
                 os.execute("hwclock -w -u 2>/dev/null || hwclock -w --utc 2>/dev/null")
             else
-                print(string.format("[time] DRIFT: RTC > SYS. Syncing FROM RTC."))
+                print("[time] DRIFT: RTC > SYS. Syncing FROM RTC.")
                 os.execute("hwclock -s -u 2>/dev/null || hwclock -s --utc 2>/dev/null")
             end
         end
     end
-    -- Both invalid: last resort — try to restore from checkpoint file
+    -- Both invalid: last resort — try checkpoint
     if not sys_valid and not rtc_valid then
         local rf = io.open("/tmp/kdb_time_checkpoint", "r")
         if rf then
@@ -1499,7 +1521,7 @@ local function try_rtc_time_sync()
                     local date_cmd = os.date("!%m%d%H%M%Y.%S", restore_epoch)
                     os.execute("date " .. date_cmd .. " 2>/dev/null")
                     os.execute("hwclock -w -u 2>/dev/null")
-                    print(string.format("[time] Both clocks dead. Restored from checkpoint → %s",
+                    print(string.format("[time] Both clocks dead. Restored from checkpoint -> %s",
                           os.date("!%Y-%m-%d %H:%M:%S", restore_epoch)))
                 end
             end
