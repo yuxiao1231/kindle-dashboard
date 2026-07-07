@@ -1443,19 +1443,75 @@ local function night_rtc_sleep(config, i18n, wake_epoch)
     return Input.TIMEOUT
 end
 
--- Defensive RTC drift detection: compare system clock with RTC via sysfs.
--- Uses /sys/class/rtc/rtcN/date and /sys/class/rtc/rtcN/time which return
--- human-readable UTC strings, avoiding ioctl/FFI and os.time() timezone pitfalls.
---
--- IMPORTANT: The RTC battery on many K4NT units is permanently dead.
--- We cache this fact after the first detection + one write attempt,
--- so we don't spam hwclock every 60 seconds (which would flood the log
--- and waste CPU on a write that can never persist).
-local _rtc_known_dead  = false   -- set true once we've tried and failed
-local _rtc_write_epoch = 0       -- last time we attempted hwclock -w
-local RTC_WRITE_INTERVAL = 3600  -- retry hwclock -w at most once per hour
+-- RTC health flag. Probed once at startup; if dead, all hwclock writes
+-- are permanently skipped for the entire session.  The RTC battery on
+-- many K4NT units is permanently dead — writes never persist, and
+-- calling hwclock every 60 s just floods the log and wastes CPU.
+local _rtc_dead = false
 
+-- One-time RTC health probe.  Attempts a single hwclock -w; then reads
+-- back the sysfs date.  If it still says 1970, the battery is dead.
+local function probe_rtc_health()
+    local rtc_date = sh("cat /sys/class/rtc/rtc1/date 2>/dev/null")
+                  or sh("cat /sys/class/rtc/rtc0/date 2>/dev/null")
+    if not rtc_date then
+        print("[time] No RTC sysfs found. Marking RTC as dead.")
+        _rtc_dead = true
+        return
+    end
+    local ry = tonumber(rtc_date:match("(%d+)")) or 0
+    if ry >= 2020 then
+        print("[time] RTC alive: " .. rtc_date)
+        _rtc_dead = false
+        return
+    end
+    -- RTC reads 1970 — try one write and verify
+    local sys_year = tonumber(os.date("!%Y")) or 0
+    if sys_year >= 2020 then
+        os.execute("hwclock -w -u 2>/dev/null || hwclock -w --utc 2>/dev/null")
+        -- re-read
+        rtc_date = sh("cat /sys/class/rtc/rtc1/date 2>/dev/null")
+                or sh("cat /sys/class/rtc/rtc0/date 2>/dev/null")
+        ry = rtc_date and tonumber(rtc_date:match("(%d+)")) or 0
+        if ry >= 2020 then
+            print("[time] RTC recovered after write: " .. rtc_date)
+            _rtc_dead = false
+            return
+        end
+    end
+    print("[time] RTC battery dead (" .. tostring(rtc_date) .. "). All hwclock writes disabled for this session.")
+    _rtc_dead = true
+end
+
+-- Lightweight per-iteration clock sanity check.
+-- If RTC is dead, we skip all hwclock calls and only do checkpoint restore
+-- when the system clock itself is also corrupted (e.g. after STR resume).
 local function try_rtc_time_sync()
+    local sys_valid = (tonumber(os.date("!%Y")) or 0) >= 2020
+
+    if _rtc_dead then
+        -- RTC is dead. The only thing we can do is restore from checkpoint
+        -- if the system clock also got corrupted.
+        if not sys_valid then
+            local rf = io.open("/tmp/kdb_time_checkpoint", "r")
+            if rf then
+                local line = rf:read("*l"); rf:close()
+                if line then
+                    local _, saved_wake = line:match("(%d+)%s+(%d+)")
+                    if saved_wake then
+                        local restore_epoch = tonumber(saved_wake)
+                        local date_cmd = os.date("!%m%d%H%M%Y.%S", restore_epoch)
+                        os.execute("date " .. date_cmd .. " 2>/dev/null")
+                        print(string.format("[time] Clock corrupted. Restored from checkpoint -> %s",
+                              os.date("!%Y-%m-%d %H:%M:%S", restore_epoch)))
+                    end
+                end
+            end
+        end
+        return  -- nothing else to do when RTC is dead
+    end
+
+    -- RTC is alive — do normal drift detection
     local rtc_date = sh("cat /sys/class/rtc/rtc1/date 2>/dev/null")
                   or sh("cat /sys/class/rtc/rtc0/date 2>/dev/null")
     local rtc_time = sh("cat /sys/class/rtc/rtc1/time 2>/dev/null")
@@ -1466,32 +1522,14 @@ local function try_rtc_time_sync()
     local rh = rtc_time:match("(%d+):")
     if not ry or not rh then return end
     ry = tonumber(ry)
-
-    local sys = os.date("!*t")
-    local sys_valid = sys.year >= 2020
     local rtc_valid = ry >= 2020
 
+    local sys = os.date("!*t")
+    sys_valid = sys.year >= 2020
+
     if sys_valid and not rtc_valid then
-        -- RTC is dead. Only attempt hwclock write at most once per hour.
-        if not _rtc_known_dead then
-            -- First detection this session: attempt one write and log it
-            print(string.format("[time] RTC dead (%s). Attempting hwclock write (one-time).", rtc_date))
-            os.execute("hwclock -w -u 2>/dev/null || hwclock -w --utc 2>/dev/null")
-            _rtc_write_epoch = os.time()
-            _rtc_known_dead  = true
-        elseif (os.time() - _rtc_write_epoch) > RTC_WRITE_INTERVAL then
-            -- Periodic retry (once per hour) in case RTC comes back to life
-            os.execute("hwclock -w -u 2>/dev/null || hwclock -w --utc 2>/dev/null")
-            _rtc_write_epoch = os.time()
-        end
-        -- else: silently skip — RTC is known dead, no point spamming
-        return
-    end
-
-    -- If RTC is now valid, clear the "known dead" flag
-    if rtc_valid then _rtc_known_dead = false end
-
-    if rtc_valid and not sys_valid then
+        os.execute("hwclock -w -u 2>/dev/null || hwclock -w --utc 2>/dev/null")
+    elseif rtc_valid and not sys_valid then
         print(string.format("[time] System clock bad (%04d). Syncing FROM RTC (%s).", sys.year, rtc_date))
         os.execute("hwclock -s -u 2>/dev/null || hwclock -s --utc 2>/dev/null")
     elseif rtc_valid and sys_valid then
@@ -1509,24 +1547,6 @@ local function try_rtc_time_sync()
             end
         end
     end
-    -- Both invalid: last resort — try checkpoint
-    if not sys_valid and not rtc_valid then
-        local rf = io.open("/tmp/kdb_time_checkpoint", "r")
-        if rf then
-            local line = rf:read("*l"); rf:close()
-            if line then
-                local _, saved_wake = line:match("(%d+)%s+(%d+)")
-                if saved_wake then
-                    local restore_epoch = tonumber(saved_wake)
-                    local date_cmd = os.date("!%m%d%H%M%Y.%S", restore_epoch)
-                    os.execute("date " .. date_cmd .. " 2>/dev/null")
-                    os.execute("hwclock -w -u 2>/dev/null")
-                    print(string.format("[time] Both clocks dead. Restored from checkpoint -> %s",
-                          os.date("!%Y-%m-%d %H:%M:%S", restore_epoch)))
-                end
-            end
-        end
-    end
 end
 
 local function main()
@@ -1540,6 +1560,10 @@ local function main()
     KDB_TZ_OFFSET = math.floor((config.tz or 0) * 3600)
     local i18n = load_i18n(config.lang)
     local stealth_wake_until = 0
+
+    -- One-time RTC health check at startup.
+    -- If the battery is dead, all hwclock writes are disabled for this session.
+    probe_rtc_health()
 
     while true do
         Input.on_tap = function(count)
