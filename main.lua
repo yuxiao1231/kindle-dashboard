@@ -488,21 +488,26 @@ local function write_last_sync()
     if f then f:write(tostring(os.time())); f:close() end
 end
 
--- Full refresh triggers at midnight and noon
-local REFRESH_HOURS = { [1] = true }
-local _last_full_h  = -1
+-- Full-refresh scheduling: pure time match, zero persistent state.
+-- Startup long_cycle is called unconditionally before the main loop.
+-- Daily refresh fires when local hour == 1 AND minute == 0.
+local REFRESH_HOUR   = 1
+local _force_refresh = false  -- only set by manual long-press
 
 local function needs_full_refresh()
-    if _last_full_h == -1 then return true end
-    -- Safety: if system clock is obviously wrong (epoch), force a refresh
-    -- so that long_cycle can re-sync time via network.
+    if _force_refresh then
+        _force_refresh = false
+        return true
+    end
+    -- Safety: if system clock is at epoch, force refresh for network time sync
     local sys_year = tonumber(os.date("!%Y")) or 0
     if sys_year < 2020 then return true end
     local h = tonumber(local_date("%H")) or 0
-    return REFRESH_HOURS[h] and (h ~= _last_full_h)
+    local m = tonumber(local_date("%M")) or 0
+    return h == REFRESH_HOUR and m == 0
 end
 
-local function force_full_refresh() _last_full_h = -1 end
+local function force_full_refresh() _force_refresh = true end
 
 local NetManager = require("net_manager")
 
@@ -1565,6 +1570,9 @@ local function main()
     -- If the battery is dead, all hwclock writes are disabled for this session.
     probe_rtc_health()
 
+    -- Unconditional first long_cycle: fetch weather, sync time, render UI.
+    long_cycle(config, memo_lines, i18n)
+
     while true do
         Input.on_tap = function(count)
             if count > 0 then
@@ -1592,7 +1600,6 @@ local function main()
         if needs_full_refresh() then
             config, memo_lines = intake_and_parse()
             long_cycle(config, memo_lines, i18n)
-            _last_full_h = tonumber(local_date("%H", os.time())) or 0
             stealth_wake_until = os.time() + 30
             did_refresh = true
         end
