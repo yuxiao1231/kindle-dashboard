@@ -2,6 +2,15 @@
 
 All notable changes to KDB (Kindle Dashboard) are documented here.
 
+## [v1.06] — 2026-07-14
+
+### 🤖 Auto-generated from git commits
+- Fix: Replace _last_full_h with _long_done edge-trigger to fix cross-day update bug
+- Refactor: Zero-state daily refresh logic
+- docs: add CHANGELOG.md with full version history
+
+---
+
 ---
 
 ## [v1.05] — 2026-07-07
