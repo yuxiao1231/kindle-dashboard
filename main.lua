@@ -494,8 +494,11 @@ end
 -- long_cycle per refresh-hour per day, with no cross-day stale state.
 local REFRESH_HOURS  = { [1] = true }
 local _long_done     = false   -- true = already refreshed this window
+local _first_run     = true    -- forces a refresh on startup
 
 local function needs_full_refresh()
+    if _first_run then return true end
+
     -- Safety: if system clock is at epoch, force refresh for network time sync
     local sys_year = tonumber(os.date("!%Y")) or 0
     if sys_year < 2020 then return true end
@@ -509,7 +512,10 @@ local function needs_full_refresh()
     end
 end
 
-local function force_full_refresh() _long_done = false end
+local function force_full_refresh()
+    _long_done = false
+    _first_run = true
+end
 
 local NetManager = require("net_manager")
 
@@ -1600,6 +1606,7 @@ local function main()
             config, memo_lines = intake_and_parse()
             long_cycle(config, memo_lines, i18n)
             _long_done = true
+            _first_run = false
             stealth_wake_until = os.time() + 30
             did_refresh = true
         end
