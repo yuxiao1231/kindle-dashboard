@@ -71,8 +71,50 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main  # Checkout main so we can push the changelog back
+
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
+
+      - name: Auto-update CHANGELOG.md
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          # Find the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 ${{ github.ref_name }}^ 2>/dev/null || echo "")
+          
+          # Get commits between prev tag and new tag
+          if [ -n "$PREV_TAG" ]; then
+            COMMITS=$(git log --format="- %s" $PREV_TAG..${{ github.ref_name }})
+          else
+            COMMITS=$(git log --format="- %s" ${{ github.ref_name }})
+          fi
+          
+          # Build new changelog section
+          echo "## [${{ github.ref_name }}] — $(date +%Y-%m-%d)" > temp_cl.md
+          echo "" >> temp_cl.md
+          echo "### 🤖 Auto-generated from git commits" >> temp_cl.md
+          echo "$COMMITS" >> temp_cl.md
+          echo "" >> temp_cl.md
+          echo "---" >> temp_cl.md
+          echo "" >> temp_cl.md
+          
+          # Prepend to existing CHANGELOG.md (skip the first 4 lines of header)
+          head -n 4 CHANGELOG.md > new_cl.md
+          cat temp_cl.md >> new_cl.md
+          tail -n +5 CHANGELOG.md >> new_cl.md
+          mv new_cl.md CHANGELOG.md
+          rm temp_cl.md
+          
+          # Commit and push back to main
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "docs: auto-update CHANGELOG.md for ${{ github.ref_name }} [skip ci]" || echo "No changes"
+          git push origin main
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -88,7 +130,7 @@ jobs:
             2. 解压并将文件夹放入 Kindle 的 `extensions` 目录。
             3. 修改 `memo.txt` 完成初始化配置。
             
-            ### 工具说明 / Tools
-            - `kdb_splash_tool.exe`: 用于转换 Kindle 启动屏（Splash）的 Windows 桌面小工具。
+            *(Release notes auto-generated from git commits)*
           draft: false
-          prerelease: falsegit add .
+          prerelease: false
+          generate_release_notes: true

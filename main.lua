@@ -488,26 +488,28 @@ local function write_last_sync()
     if f then f:write(tostring(os.time())); f:close() end
 end
 
--- Full-refresh scheduling: pure time match, zero persistent state.
--- Startup long_cycle is called unconditionally before the main loop.
--- Daily refresh fires when local hour == 1 AND minute == 0.
-local REFRESH_HOUR   = 1
-local _force_refresh = false  -- only set by manual long-press
+-- Full-refresh scheduling.
+-- _long_done is set true after a successful long_cycle, and re-armed (false)
+-- once the clock leaves the refresh window.  This guarantees exactly one
+-- long_cycle per refresh-hour per day, with no cross-day stale state.
+local REFRESH_HOURS  = { [1] = true }
+local _long_done     = false   -- true = already refreshed this window
 
 local function needs_full_refresh()
-    if _force_refresh then
-        _force_refresh = false
-        return true
-    end
     -- Safety: if system clock is at epoch, force refresh for network time sync
     local sys_year = tonumber(os.date("!%Y")) or 0
     if sys_year < 2020 then return true end
+
     local h = tonumber(local_date("%H")) or 0
-    local m = tonumber(local_date("%M")) or 0
-    return h == REFRESH_HOUR and m == 0
+    if REFRESH_HOURS[h] then
+        return not _long_done   -- fire once per window
+    else
+        _long_done = false      -- re-arm when we leave the window
+        return false
+    end
 end
 
-local function force_full_refresh() _force_refresh = true end
+local function force_full_refresh() _long_done = false end
 
 local NetManager = require("net_manager")
 
@@ -1570,9 +1572,6 @@ local function main()
     -- If the battery is dead, all hwclock writes are disabled for this session.
     probe_rtc_health()
 
-    -- Unconditional first long_cycle: fetch weather, sync time, render UI.
-    long_cycle(config, memo_lines, i18n)
-
     while true do
         Input.on_tap = function(count)
             if count > 0 then
@@ -1600,6 +1599,7 @@ local function main()
         if needs_full_refresh() then
             config, memo_lines = intake_and_parse()
             long_cycle(config, memo_lines, i18n)
+            _long_done = true
             stealth_wake_until = os.time() + 30
             did_refresh = true
         end
