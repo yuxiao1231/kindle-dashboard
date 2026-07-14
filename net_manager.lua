@@ -3,7 +3,7 @@
 
 local NetManager = {}
 
-local WIFI_HALF       = 15
+local WIFI_HALF       = 30
 local WEATHER_TIMEOUT = 15
 local WEATHER_CACHE   = "/tmp/kdb_weather.json"
 
