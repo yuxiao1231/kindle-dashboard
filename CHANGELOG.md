@@ -2,6 +2,14 @@
 
 All notable changes to KDB (Kindle Dashboard) are documented here.
 
+## [v1.07] — 2026-07-14
+
+### 🤖 Auto-generated from git commits
+- Fix: Restore startup refresh trigger lost in edge-trigger refactor
+- docs: auto-update CHANGELOG.md for v1.06 [skip ci]
+
+---
+
 ## [v1.06] — 2026-07-14
 
 ### 🤖 Auto-generated from git commits
