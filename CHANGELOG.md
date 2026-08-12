@@ -2,6 +2,16 @@
 
 All notable changes to KDB (Kindle Dashboard) are documented here.
 
+## [v1.08] — 2026-08-12
+
+### 🤖 Auto-generated from git commits
+- net: multi-step scan/verify/retry WiFi connection; fix release packaging
+- Fix: Increase Wi-Fi connection timeout to 30s for slow handshakes
+- docs: auto-update CHANGELOG.md for v1.07 [skip ci]
+- docs: auto-update CHANGELOG.md for v1.07 [skip ci]
+
+---
+
 ## [v1.07] — 2026-07-14
 
 ### 🤖 Auto-generated from git commits
