@@ -3,7 +3,11 @@
 
 local NetManager = {}
 
-local WIFI_HALF       = 30
+local POLL_INTERVAL   = 1
+local SCAN_WAIT       = 3
+local ATTEMPT_TIMEOUT = 12
+local MAX_RETRIES     = 3
+local FALLBACK_WAIT   = 20
 local WEATHER_TIMEOUT = 15
 local WEATHER_CACHE   = "/tmp/kdb_weather.json"
 
@@ -62,28 +66,64 @@ local function ensure_dhcp()
     return true
 end
 
-local function wifi_try_wpa_cli(ssid, pw)
-    print("[net] wpa_cli: attempting to connect → " .. ssid)
+-- Scan and check whether the target SSID is visible to the radio.
+-- Returns true if found, false otherwise. Tries up to `rounds` scans.
+local function scan_for_ssid(ssid, rounds)
+    for r = 1, (rounds or 2) do
+        sh("wpa_cli -i wlan0 scan 2>/dev/null")
+        os.execute("sleep " .. SCAN_WAIT)
+        local results = sh("wpa_cli -i wlan0 scan_results 2>/dev/null") or ""
+        if results:find(ssid, 1, true) then
+            print("[net] scan: SSID '" .. ssid .. "' found (round " .. r .. ")")
+            return true
+        end
+        if r < rounds then
+            print("[net] scan: SSID not seen, rescanning (" .. r .. "/" .. rounds .. ")...")
+        end
+    end
+    print("[net] scan: SSID '" .. ssid .. "' NOT found after " .. rounds .. " scans.")
+    return false
+end
 
+-- Wait for wpa_state==COMPLETED, polling every POLL_INTERVAL for up to `timeout` seconds.
+-- Logs state transitions. Returns true on success.
+local function wait_for_completed(timeout)
+    local last = ""
+    for i = 1, timeout do
+        local full = sh("wpa_cli -i wlan0 status 2>/dev/null") or ""
+        local state = full:match("wpa_state=(%S+)") or "UNKNOWN"
+        if state ~= last then
+            print("[net] state: " .. state .. " (+" .. i .. "s)")
+            last = state
+        end
+        if state == "COMPLETED" then return true end
+        os.execute("sleep " .. POLL_INTERVAL)
+    end
+    return false
+end
+
+local function wifi_try_wpa_cli(ssid, pw)
+    print("[net] wpa_cli: connecting → " .. ssid)
+
+    -- ── Step 1: register the network in wpa_supplicant ──
     local raw_id
     for attempt = 1, 10 do
         raw_id = sh("wpa_cli -i wlan0 add_network 2>/dev/null")
         if raw_id and raw_id:match("%d+") then break end
-        print("[net] wpa_cli: wpa_supplicant not ready, retry " .. attempt .. "/10")
+        print("[net] wpa_supplicant not ready, retry " .. attempt .. "/10")
         os.execute("sleep 1")
         raw_id = nil
     end
     if not raw_id then
-        print("[net] wpa_cli: add_network failed after retries.")
+        print("[net] add_network failed after retries.")
         return false
     end
     local net_id = raw_id:match("(%d+)")
     if not net_id then return false end
-    print("[net] wpa_cli: allocated network id=" .. net_id)
+    print("[net] allocated network id=" .. net_id)
 
     local safe_ssid = ssid:gsub("'", "'\\''")
-    local r1 = sh(string.format("wpa_cli -i wlan0 set_network %s ssid '\"%s\"' 2>/dev/null", net_id, safe_ssid))
-    if r1 ~= "OK" then
+    if sh(string.format("wpa_cli -i wlan0 set_network %s ssid '\"%s\"' 2>/dev/null", net_id, safe_ssid)) ~= "OK" then
         os.execute(string.format("wpa_cli -i wlan0 remove_network %s 2>/dev/null", net_id))
         return false
     end
@@ -98,10 +138,9 @@ local function wifi_try_wpa_cli(ssid, pw)
         sh(string.format("wpa_cli -i wlan0 set_network %s proto \"RSN\" 2>/dev/null", net_id))
         sh(string.format("wpa_cli -i wlan0 set_network %s pairwise CCMP 2>/dev/null", net_id))
         sh(string.format("wpa_cli -i wlan0 set_network %s group CCMP 2>/dev/null", net_id))
-        
+
         local safe_pw = pw:gsub("'", "'\\''")
-        local r2 = sh(string.format("wpa_cli -i wlan0 set_network %s psk '\"%s\"' 2>/dev/null", net_id, safe_pw))
-        if r2 ~= "OK" then
+        if sh(string.format("wpa_cli -i wlan0 set_network %s psk '\"%s\"' 2>/dev/null", net_id, safe_pw)) ~= "OK" then
             os.execute(string.format("wpa_cli -i wlan0 remove_network %s 2>/dev/null", net_id))
             return false
         end
@@ -109,21 +148,31 @@ local function wifi_try_wpa_cli(ssid, pw)
         sh(string.format("wpa_cli -i wlan0 set_network %s key_mgmt NONE 2>/dev/null", net_id))
     end
 
+    -- ── Step 2: verify the SSID is actually visible ──
     sh(string.format("wpa_cli -i wlan0 enable_network %s 2>/dev/null", net_id))
-    sh("wpa_cli -i wlan0 disconnect 2>/dev/null")
-    sh(string.format("wpa_cli -i wlan0 select_network %s 2>/dev/null", net_id))
-    sh("wpa_cli -i wlan0 scan 2>/dev/null")
-    sh("wpa_cli -i wlan0 reconnect 2>/dev/null")
-    print("[net] wpa_cli: network selected and scanning forced...")
-
-    for i = 1, WIFI_HALF do
-        local state = sh("wpa_cli -i wlan0 status 2>/dev/null | grep wpa_state")
-        if state and state:match("COMPLETED") then
-            return ensure_dhcp()
-        end
-        os.execute("sleep 1")
+    if not scan_for_ssid(ssid, 2) then
+        print("[net] SSID invisible to radio — aborting.")
+        os.execute(string.format("wpa_cli -i wlan0 remove_network %s 2>/dev/null", net_id))
+        os.execute("wpa_cli -i wlan0 enable_network all 2>/dev/null")
+        return false
     end
 
+    -- ── Step 3: attempt connection with retries ──
+    for attempt = 1, MAX_RETRIES do
+        print(string.format("[net] connection attempt %d/%d ...", attempt, MAX_RETRIES))
+        sh("wpa_cli -i wlan0 disconnect 2>/dev/null")
+        sh(string.format("wpa_cli -i wlan0 select_network %s 2>/dev/null", net_id))
+        sh("wpa_cli -i wlan0 reconnect 2>/dev/null")
+
+        if wait_for_completed(ATTEMPT_TIMEOUT) then
+            print("[net] CONNECTED on attempt " .. attempt)
+            return ensure_dhcp()
+        end
+        print("[net] attempt " .. attempt .. " timed out.")
+    end
+
+    -- ── Cleanup ──
+    print("[net] all " .. MAX_RETRIES .. " attempts failed.")
     os.execute(string.format("wpa_cli -i wlan0 remove_network %s 2>/dev/null", net_id))
     os.execute("wpa_cli -i wlan0 enable_network all 2>/dev/null")
     return false
@@ -147,7 +196,7 @@ function NetManager.connect(config)
     os.execute("killall -CONT wifid 2>/dev/null")
     print("[net] Trying Kindle saved networks...")
     os.execute("wpa_cli -i wlan0 reassociate 2>/dev/null")
-    for i = 1, WIFI_HALF do
+    for i = 1, FALLBACK_WAIT do
         if is_wifi_connected() then
             return ensure_dhcp()
         end

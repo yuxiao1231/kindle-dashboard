@@ -27,7 +27,7 @@ jobs:
           # 模拟 Kindle extensions 结构
           mkdir -p kdb_$VERSION
           # 拷贝必要文件，排除 tools 和 git 相关
-          cp -r bin lib assets main.lua memo.txt README.md LICENSE kdb_$VERSION/
+          cp -r bin lib assets main.lua net_manager.lua start.sh config.json config.xml menu.json memo.txt README.md LICENSE kdb_$VERSION/
           zip -r kdb-$VERSION-kindle.zip kdb_$VERSION/
 
       - name: Upload Kindle Artifact
