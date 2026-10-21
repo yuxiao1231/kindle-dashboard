@@ -24,11 +24,12 @@ jobs:
           # 如果是手动触发没有Tag，则默认叫 v_latest
           if [ "$VERSION" = "main" ]; then VERSION="v_latest"; fi
           
-          # 模拟 Kindle extensions 结构
-          mkdir -p kdb_$VERSION
+          # 模拟 Kindle extensions 结构 (固定为 kdb_plugin 方便覆盖升级，配合相对路径 menu.json)
+          mkdir -p kdb_plugin
           # 拷贝必要文件，排除 tools 和 git 相关
-          cp -r bin lib assets main.lua net_manager.lua start.sh config.json config.xml menu.json memo.txt README.md LICENSE kdb_$VERSION/
-          zip -r kdb-$VERSION-kindle.zip kdb_$VERSION/
+          cp -r bin lib assets main.lua net_manager.lua start.sh config.json config.xml menu.json memo.txt README.md LICENSE kdb_plugin/
+          chmod +x kdb_plugin/start.sh kdb_plugin/bin/* 2>/dev/null || true
+          zip -r kdb-$VERSION-kindle.zip kdb_plugin/
 
       - name: Upload Kindle Artifact
         uses: actions/upload-artifact@v4

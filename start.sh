@@ -9,6 +9,7 @@ export LD_PRELOAD="$KDB_ROOT/lib/libstdc++.so.6"
 
 LUA_BIN="$KDB_ROOT/bin/luajit"
 FBINK="$KDB_ROOT/bin/fbink"
+chmod +x "$LUA_BIN" "$FBINK" 2>/dev/null || true
 LOG="$KDB_ROOT/debug.log"
 
 CUSTOM_SPLASH_PNG="$KDB_ROOT/custom_splash.png"

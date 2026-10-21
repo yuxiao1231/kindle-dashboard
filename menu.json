@@ -3,7 +3,7 @@
     {
       "name": "Kindle Desk",
       "priority": 1,
-      "action": "sh /mnt/us/extensions/kdb_plugin/start.sh"
+      "action": "sh ./start.sh"
     }
   ]
 }
