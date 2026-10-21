@@ -2,6 +2,14 @@
 
 All notable changes to KDB (Kindle Dashboard) are documented here.
 
+## [v1.09] — 2026-10-21
+
+### 🤖 Auto-generated from git commits
+- fix(launcher): use relative path in menu.json and package as kdb_plugin (Fixes #1)
+- docs: auto-update CHANGELOG.md for v1.08 [skip ci]
+
+---
+
 ## [v1.08] — 2026-08-12
 
 ### 🤖 Auto-generated from git commits
